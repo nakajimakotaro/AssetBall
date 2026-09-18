@@ -1,0 +1,20 @@
+using System.Diagnostics;
+using AssetBall.Aws;
+using AssetBall.Core;
+
+int count = args.Length == 0 ? 100_000 : int.Parse(args[0]);
+const long size = 1024 * 1024;
+string hash = new('a', 64);
+var input = Enumerable.Range(0, count).Select(i => new AssetEntry($"asset-{i:D8}", 0, size, hash)).ToArray();
+var old = new BallIndex(BallIndex.FileName(hash), size * count, hash, Planner.Layout(input));
+var changed = input.Select((a, i) => i % 10 == 0 ? new AssetEntry(a.Path, 0, a.Size, new string('b', 64)) : a).ToArray();
+long allocated = GC.GetAllocatedBytesForCurrentThread();
+var timer = Stopwatch.StartNew();
+var layout = Planner.Layout(changed, old);
+var next = new BallIndex(BallIndex.FileName(hash), size * count, hash, layout);
+var delta = Planner.Compare(old, next);
+var multipart = MultipartPlanner.Create(old, next);
+timer.Stop();
+Console.WriteLine($"Assets={count:N0}; Ball={next.Size:N0} bytes; elapsed={timer.ElapsedMilliseconds} ms");
+Console.WriteLine($"Allocated={GC.GetAllocatedBytesForCurrentThread() - allocated:N0} bytes (metadata only)");
+Console.WriteLine($"HTTP ranges={delta.Downloads.Count}; S3 parts={multipart.Parts.Count}; copy={multipart.CopyBytes:N0}; upload={multipart.UploadBytes:N0}");

@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>netstandard2.1</TargetFramework></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/AssetBall.Client/AssetBall.Client.csproj" /></ItemGroup>
+</Project>
