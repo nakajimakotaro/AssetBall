@@ -1,5 +1,3 @@
-using AssetBall.Core;
-
 if (args.Length < 1)
 {
     Console.Error.WriteLine("Usage: dotnet run --project samples/RangeServer -- <ball-directory> [--urls http://127.0.0.1:5080]");
@@ -12,10 +10,10 @@ var builder = WebApplication.CreateBuilder(args.Skip(1).ToArray());
 var app = builder.Build();
 app.MapGet("/{file}", (string file, HttpContext context) =>
 {
-    // 配信対象を Index と内容ハッシュ付き Ball に限定し、作業中の一時ファイルなどを公開しない。
+    // 配信対象を Index と Ball に限定し、作業中の一時ファイルなどを公開しない。
     bool isIndex = file == "index.json";
     bool isBall = file.StartsWith("ball-", StringComparison.Ordinal) && file.EndsWith(".bin", StringComparison.Ordinal) &&
-        BallIndex.IsHash(file.Substring(5, file.Length - 9));
+        file.All(c => char.IsLetterOrDigit(c) || c == '-' || c == '_' || c == '.');
     if (!isIndex && !isBall) return Results.NotFound();
     string path = Path.Combine(root, file);
     if (!File.Exists(path)) return Results.NotFound();

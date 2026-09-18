@@ -74,7 +74,7 @@ public sealed class AssetBallClient
                         await StreamIO.CopyExactlyAsync(source, target, copy.Length, cancellationToken).ConfigureAwait(false);
                     }
                 }
-                // 検証済みの BallFile はハッシュを含む単一ファイル名。同じ配信ディレクトリの対象世代を取得する。
+                // BallFile は単一ファイル名。同じ配信ディレクトリの対象世代を取得する。
                 var ballUri = new Uri(indexUri, remote.BallFile);
                 foreach (var range in plan.Downloads)
                 {

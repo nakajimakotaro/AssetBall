@@ -124,8 +124,28 @@ public sealed class S3Tests
         Assert.Equal(File.ReadAllBytes(Path.Combine(w.Dir("work"), second.Index.BallFile)), s3.Objects["release/" + second.Index.BallFile]);
         Assert.True(s3.Objects.ContainsKey("release/" + first.Index.BallFile));
         s3.Events.Clear();
-        await deployer.DeployDirectoryAsync(w.Dir("input"), w.Dir("work"), "test", "release");
-        Assert.Equal(new[] { "get", "head", "publish" }, s3.Events);
+        var unchanged = await deployer.DeployDirectoryAsync(w.Dir("input"), w.Dir("work"), "test", "release");
+        Assert.Equal(new[] { "get", "head", "initiate", "copy", "complete", "publish" }, s3.Events);
+        Assert.NotEqual(second.Index.BallFile, unchanged.Index.BallFile);
+        Assert.Equal(s3.Objects["release/" + second.Index.BallFile], s3.Objects["release/" + unchanged.Index.BallFile]);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("abc")]
+    public async Task IdenticalContentIsPublishedUnderANewBallName(string content)
+    {
+        using var w = new Workspace(); w.Put("input", "a", content);
+        using var s3 = new FakeS3();
+        var deployer = new S3Deployer(s3);
+        var first = await deployer.DeployDirectoryAsync(w.Dir("input"), w.Dir("work"), "test");
+        s3.Events.Clear();
+        var second = await deployer.DeployDirectoryAsync(w.Dir("input"), w.Dir("work"), "test");
+        Assert.NotEqual(first.Index.BallFile, second.Index.BallFile);
+        Assert.Equal(content.Length == 0
+            ? new[] { "get", "put-ball", "publish" }
+            : new[] { "get", "initiate", "upload", "complete", "publish" }, s3.Events);
+        Assert.Equal(s3.Objects[first.Index.BallFile], s3.Objects[second.Index.BallFile]);
     }
 
     [Fact]

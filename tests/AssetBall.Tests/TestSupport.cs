@@ -27,6 +27,6 @@ internal static class Fixtures
     {
         var layout = Planner.Layout(assets, previous);
         string hash = Hash("synthetic index for pure planner tests");
-        return new BallIndex(BallIndex.FileName(hash), layout.Sum(a => a.Size), hash, layout);
+        return new BallIndex(BallIndex.FileName(hash, DateTimeOffset.UnixEpoch), layout.Sum(a => a.Size), hash, layout);
     }
 }

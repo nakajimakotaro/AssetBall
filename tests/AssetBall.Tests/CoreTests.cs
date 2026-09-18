@@ -7,6 +7,41 @@ namespace AssetBall.Tests;
 public sealed class CoreTests
 {
     [Fact]
+    public void BallFileNamesSortByUtcTimeAcrossDateBoundariesAndCultures()
+    {
+        var originalCulture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("th-TH");
+            var first = new DateTimeOffset(2026, 12, 31, 23, 59, 59, TimeSpan.Zero).AddTicks(9999999);
+            var second = first.AddTicks(1).ToOffset(TimeSpan.FromHours(9));
+            string older = BallIndex.FileName(new string('f', 64), first);
+            string newer = BallIndex.FileName(new string('0', 64), second);
+            Assert.StartsWith("ball-20261231T235959.9999999Z-", older);
+            Assert.StartsWith("ball-20270101T000000.0000000Z-", newer);
+            Assert.True(StringComparer.Ordinal.Compare(older, newer) < 0);
+            Assert.Equal(newer, BallIndex.FileName(new string('0', 64), second.ToUniversalTime()));
+        }
+        finally { System.Globalization.CultureInfo.CurrentCulture = originalCulture; }
+    }
+
+    [Fact]
+    public void BallFileNamesOnlyRestrictPathsAndFileType()
+    {
+        string hash = Fixtures.Hash("");
+        var index = new BallIndex("ball-release.bin", 0, hash, Array.Empty<AssetEntry>());
+        Assert.Equal("ball-release.bin", index.BallFile);
+        foreach (string invalid in new[]
+        {
+            "../ball-release.bin", "ball-dir/file.bin", "ball-dir\\file.bin",
+            "https://example.com/ball-release.bin", "ball-release.bin\n",
+            "ball-%2e%2e%2ffile.bin", "ball-file?query.bin", "ball-file#fragment.bin",
+            "index.json", ".assetball.lock", ""
+        })
+            Assert.Throws<InvalidDataException>(() => new BallIndex(invalid, 0, hash, Array.Empty<AssetEntry>()));
+    }
+
+    [Fact]
     public void LayoutPreservesUnchangedOrderAndAppendsChangedAssetsDeterministically()
     {
         var old = Fixtures.Index(new[] { Fixtures.Entry("c"), Fixtures.Entry("a"), Fixtures.Entry("b"), Fixtures.Entry("deleted") });
@@ -105,7 +140,13 @@ public sealed class CoreTests
         w.Put("input", "a", "aaaa"); w.Put("input", "b", "bbbb"); w.Put("input", "empty", "");
         var first = await BallStore.BuildAsync(w.Dir("input"), w.Dir("v1"));
         var repeat = await BallStore.BuildAsync(w.Dir("input"), w.Dir("repeat"));
-        Assert.Equal(IndexJson.Serialize(first), IndexJson.Serialize(repeat));
+        Assert.Equal(first.Hash, repeat.Hash);
+        Assert.Equal(File.ReadAllBytes(Path.Combine(w.Dir("v1"), first.BallFile)),
+            File.ReadAllBytes(Path.Combine(w.Dir("repeat"), repeat.BallFile)));
+        var unchanged = await BallStore.BuildAsync(w.Dir("input"), w.Dir("v1"), first);
+        Assert.Equal(first.Hash, unchanged.Hash);
+        Assert.NotEqual(first.BallFile, unchanged.BallFile);
+        await BallStore.VerifyAsync(Path.Combine(w.Dir("v1"), unchanged.BallFile), unchanged);
         w.Put("input", "a", "new-a"); w.Put("input", "new", "hello");
         var second = await BallStore.BuildAsync(w.Dir("input"), w.Dir("v2"), first, Path.Combine(w.Dir("v1"), first.BallFile));
         Assert.Equal(new[] { "b", "empty", "a", "new" }, second.Assets.Select(x => x.Path));

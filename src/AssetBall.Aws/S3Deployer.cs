@@ -50,7 +50,7 @@ public sealed class S3Deployer
         await BallStore.VerifyAsync(ballPath, index, cancellationToken);
         // コピー元 Ball の ETag はコピー中の変更検出用。Index 公開の競合検出用 ETag とは別に扱う。
         string? sourceETag = null;
-        if (plan.CopyBytes > 0 || previous?.Index.Hash == index.Hash)
+        if (plan.CopyBytes > 0)
         {
             var metadata = await s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
             { BucketName = bucket, Key = Key(previous!.Index.BallFile) }, cancellationToken);
@@ -58,81 +58,77 @@ public sealed class S3Deployer
                 throw new InvalidDataException("Remote copy source does not match the previous Index.");
             sourceETag = metadata.ETag;
         }
-        // 同じ Ball なら再送不要。ただしパスなどのメタデータだけ変わる場合があるので、Index は公開する。
-        if (previous?.Index.Hash != index.Hash)
+        // 空 Ball は Part を作れないため、通常の PutObject で保存する。
+        if (index.Size == 0)
         {
-            // 空 Ball は Part を作れないため、通常の PutObject で保存する。
-            if (index.Size == 0)
+            using var empty = new MemoryStream(Array.Empty<byte>());
+            await s3.PutObjectAsync(new PutObjectRequest
             {
-                using var empty = new MemoryStream(Array.Empty<byte>());
-                await s3.PutObjectAsync(new PutObjectRequest
+                BucketName = bucket, Key = Key(index.BallFile), InputStream = empty,
+                ContentType = "application/octet-stream", AutoCloseStream = false,
+                Headers = { CacheControl = "public,max-age=31536000,immutable" }
+            }, cancellationToken);
+        }
+        else
+        {
+            // COMPOSITE は Part ごとのチェックサムを合成した値で、Index に記録した Ball 全体の SHA-256 とは異なる。
+            var initiation = await s3.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest
+            {
+                BucketName = bucket, Key = Key(index.BallFile), ContentType = "application/octet-stream",
+                ChecksumAlgorithm = ChecksumAlgorithm.SHA256, ChecksumType = ChecksumType.COMPOSITE,
+                Headers = { CacheControl = "public,max-age=31536000,immutable" }
+            }, cancellationToken);
+            string uploadId = initiation.UploadId;
+            try
+            {
+                var etags = new List<PartETag>();
+                foreach (var part in plan.Parts)
                 {
-                    BucketName = bucket, Key = Key(index.BallFile), InputStream = empty,
-                    ContentType = "application/octet-stream", AutoCloseStream = false,
-                    Headers = { CacheControl = "public,max-age=31536000,immutable" }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (part.CopySourceOffset is long source)
+                    {
+                        var response = await s3.CopyPartAsync(new CopyPartRequest
+                        {
+                            SourceBucket = bucket, SourceKey = Key(previous!.Index.BallFile),
+                            DestinationBucket = bucket, DestinationKey = Key(index.BallFile), UploadId = uploadId,
+                            PartNumber = part.Number, FirstByte = source, LastByte = source + part.Length - 1,
+                            ETagToMatch = new List<string> { sourceETag! }
+                        }, cancellationToken);
+                        if (string.IsNullOrEmpty(response.ChecksumSHA256)) throw new InvalidDataException("S3 copy response has no SHA-256 checksum.");
+                        etags.Add(new PartETag(part.Number, response.ETag) { ChecksumSHA256 = response.ChecksumSHA256 });
+                    }
+                    else
+                    {
+                        using var file = File.OpenRead(ballPath);
+                        using var slice = new SliceStream(file, part.Offset, part.Length);
+                        var response = await s3.UploadPartAsync(new UploadPartRequest
+                        {
+                            BucketName = bucket, Key = Key(index.BallFile), UploadId = uploadId,
+                            PartNumber = part.Number, PartSize = part.Length, InputStream = slice,
+                            ChecksumAlgorithm = ChecksumAlgorithm.SHA256,
+                            IsLastPart = part.Number == plan.Parts.Count
+                        }, cancellationToken);
+                        if (string.IsNullOrEmpty(response.ChecksumSHA256)) throw new InvalidDataException("S3 upload response has no SHA-256 checksum.");
+                        etags.Add(new PartETag(part.Number, response.ETag) { ChecksumSHA256 = response.ChecksumSHA256 });
+                    }
+                }
+                await s3.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
+                {
+                    BucketName = bucket, Key = Key(index.BallFile), UploadId = uploadId,
+                    PartETags = etags, ChecksumType = ChecksumType.COMPOSITE
                 }, cancellationToken);
             }
-            else
+            catch (Exception failure)
             {
-                // COMPOSITE は Part ごとのチェックサムを合成した値で、Index に記録した Ball 全体の SHA-256 とは異なる。
-                var initiation = await s3.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest
-                {
-                    BucketName = bucket, Key = Key(index.BallFile), ContentType = "application/octet-stream",
-                    ChecksumAlgorithm = ChecksumAlgorithm.SHA256, ChecksumType = ChecksumType.COMPOSITE,
-                    Headers = { CacheControl = "public,max-age=31536000,immutable" }
-                }, cancellationToken);
-                string uploadId = initiation.UploadId;
+                // 呼び出し元がキャンセル済みでも未完了 Part を片付けるため、後始末専用の期限付きトークンを使う。
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 try
                 {
-                    var etags = new List<PartETag>();
-                    foreach (var part in plan.Parts)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        if (part.CopySourceOffset is long source)
-                        {
-                            var response = await s3.CopyPartAsync(new CopyPartRequest
-                            {
-                                SourceBucket = bucket, SourceKey = Key(previous!.Index.BallFile),
-                                DestinationBucket = bucket, DestinationKey = Key(index.BallFile), UploadId = uploadId,
-                                PartNumber = part.Number, FirstByte = source, LastByte = source + part.Length - 1,
-                                ETagToMatch = new List<string> { sourceETag! }
-                            }, cancellationToken);
-                            if (string.IsNullOrEmpty(response.ChecksumSHA256)) throw new InvalidDataException("S3 copy response has no SHA-256 checksum.");
-                            etags.Add(new PartETag(part.Number, response.ETag) { ChecksumSHA256 = response.ChecksumSHA256 });
-                        }
-                        else
-                        {
-                            using var file = File.OpenRead(ballPath);
-                            using var slice = new SliceStream(file, part.Offset, part.Length);
-                            var response = await s3.UploadPartAsync(new UploadPartRequest
-                            {
-                                BucketName = bucket, Key = Key(index.BallFile), UploadId = uploadId,
-                                PartNumber = part.Number, PartSize = part.Length, InputStream = slice,
-                                ChecksumAlgorithm = ChecksumAlgorithm.SHA256,
-                                IsLastPart = part.Number == plan.Parts.Count
-                            }, cancellationToken);
-                            if (string.IsNullOrEmpty(response.ChecksumSHA256)) throw new InvalidDataException("S3 upload response has no SHA-256 checksum.");
-                            etags.Add(new PartETag(part.Number, response.ETag) { ChecksumSHA256 = response.ChecksumSHA256 });
-                        }
-                    }
-                    await s3.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
-                    {
-                        BucketName = bucket, Key = Key(index.BallFile), UploadId = uploadId,
-                        PartETags = etags, ChecksumType = ChecksumType.COMPOSITE
-                    }, cancellationToken);
+                    await s3.AbortMultipartUploadAsync(new AbortMultipartUploadRequest
+                    { BucketName = bucket, Key = Key(index.BallFile), UploadId = uploadId }, cleanup.Token);
                 }
-                catch (Exception failure)
-                {
-                    // 呼び出し元がキャンセル済みでも未完了 Part を片付けるため、後始末専用の期限付きトークンを使う。
-                    using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                    try
-                    {
-                        await s3.AbortMultipartUploadAsync(new AbortMultipartUploadRequest
-                        { BucketName = bucket, Key = Key(index.BallFile), UploadId = uploadId }, cleanup.Token);
-                    }
-                    catch (Exception abortFailure) { failure.Data["AbortMultipartUploadFailure"] = abortFailure; }
-                    throw;
-                }
+                catch (Exception abortFailure) { failure.Data["AbortMultipartUploadFailure"] = abortFailure; }
+                throw;
             }
         }
 

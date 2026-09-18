@@ -11,7 +11,7 @@
       "type": "object",
       "required": ["file", "size", "hash"],
       "properties": {
-        "file": { "type": "string", "pattern": "^ball-[0-9a-f]{64}\\.bin$" },
+        "file": { "type": "string", "minLength": 1 },
         "size": { "$ref": "#/$defs/size" },
         "hash": { "$ref": "#/$defs/hash" }
       }

@@ -1,66 +1,67 @@
 # AssetBall
 
-English | [日本語](README.ja.md)
+[English](README.md) | 日本語
 
-A C# reference implementation that bundles many assets into a single file and fetches changes using HTTP Range requests.
+多数のアセットを1つのファイルにまとめ、変更部分を HTTP Range Request で取得する仕組みの C# 参考実装です。
 
-Use the design and code as a starting point, and customize them for your project's delivery infrastructure and operational needs. The implementation covers asset layout, incremental downloads, and uploads to S3.
+各プロジェクトの配信環境や運用に合わせて、設計やコードを参考にしながらカスタマイズすることを想定しています。アセットの配置・差分取得・S3 へのアップロードを実装しています。
 
-For the design background and a detailed explanation, see the original Qiita article (in Japanese):
+設計の背景や仕組みの詳しい解説は、Qiita 記事をご覧ください。
 
-**[The design that reduced delivery time for 10,000+ Unity assets from 3 hours to 13 minutes](https://qiita.com/harusann2/items/50d638e7a3c2d76e0531)**
+**[Unityの1万超アセット配信を3時間→13分にした設計](https://qiita.com/harusann2/items/50d638e7a3c2d76e0531)**
 
-## How it works
+## 仕組み
 
-AssetBall generates a **Ball** containing concatenated assets and an **Index** recording their offsets, sizes, and hashes. It preserves the order of unchanged assets and moves changed or added assets to the end, making it easier to fetch changes in contiguous ranges.
+アセットを連結した **Ball** と、位置・サイズ・ハッシュを記録した **Index** を生成します。未変更アセットの順序を保ち、変更・追加されたアセットを末尾に集めることで、差分をまとめて取得しやすくします。
 
 ```text
-Initial:   A | B | C | D
-Update B:  A | C | D | B′
-Update D:  A | C | B′ | D′
+初回:      A | B | C | D
+B を更新:  A | C | D | B′
+D を更新:  A | C | B′ | D′
 ```
 
-The client compares indexes and fetches the required contiguous ranges using HTTP Range requests. S3 updates reuse unchanged data through `UploadPartCopy`.
+クライアントは Index を比較し、必要な連続範囲を HTTP Range Request で取得します。S3 への更新では、未変更部分を `UploadPartCopy` で再利用します。
 
-## Code structure
+## コードの構成
 
-| Directory | Contents |
+| ディレクトリ | 内容 |
 | --- | --- |
-| [src/AssetBall.Core](src/AssetBall.Core) | Index, asset layout, update planning, Ball generation and verification |
-| [src/AssetBall.Client](src/AssetBall.Client) | Incremental HTTP downloads, local updates, asset reading |
-| [src/AssetBall.Aws](src/AssetBall.Aws) | S3 uploads and updates |
-| [src/AssetBall.Cli](src/AssetBall.Cli) | CLI for building, comparing, fetching, and deploying |
-| [samples](samples) | Local delivery server and Unity usage example |
+| [src/AssetBall.Core](src/AssetBall.Core) | Index、アセットの配置、差分計画、Ball の生成・検証 |
+| [src/AssetBall.Client](src/AssetBall.Client) | HTTP による差分取得、ローカル更新、アセット読み出し |
+| [src/AssetBall.Aws](src/AssetBall.Aws) | S3 へのアップロード・更新 |
+| [src/AssetBall.Cli](src/AssetBall.Cli) | 生成・比較・取得・デプロイ用 CLI |
+| [samples](samples) | ローカル配信サーバー、Unity 向け利用例 |
 
-Core / Client target .NET Standard 2.1. AWS / CLI target .NET 10.
+Core / Client は .NET Standard 2.1、AWS / CLI は .NET 10 を対象としています。
 
-## Try it
+## 試す
 
-Install the .NET 10 SDK and run these commands from the repository root. Place any files you want to bundle in `assets/`.
+.NET 10 SDK を用意し、リポジトリ直下で実行します。任意のファイルを `assets/` に配置してください。
 
 ```sh
-# Generate a Ball and Index
+# Ball と Index を生成
 dotnet run --project src/AssetBall.Cli -- build assets artifacts/v1
 
-# Update after changing, adding, or deleting files in assets
+# assets の一部を変更・追加・削除した後に更新
 dotnet run --project src/AssetBall.Cli -- update assets artifacts/v1/index.json artifacts/v2
 
-# Inspect the differences
+# 差分を確認
 dotnet run --project src/AssetBall.Cli -- diff artifacts/v1/index.json artifacts/v2/index.json
 ```
 
-The output files are `index.json` and `ball-<SHA-256>.bin`. Run `dotnet run --project src/AssetBall.Cli -- --help` for other commands.
+出力は `index.json` と `ball-<UTC日時>-<SHA-256>.bin` です。日時は `20260918T072345.1234567Z` のような固定桁で、ファイル名順に日時順で並びます。ビルドごとに日時を付与します。その他のコマンドは `dotnet run --project src/AssetBall.Cli -- --help` で確認できます。
 
-## Customization
+## カスタマイズについて
 
-Adapt delivery endpoints, authentication, cache storage and version retention, and application integration to your requirements. This implementation also keeps a local Ball and exposes assets as streams.
+配信先や認証、キャッシュの保存方法・世代管理、アプリへの組み込みは、各現場の要件に合わせて調整してください。この実装はローカルにも Ball を保持し、アセットを Stream として読み出します。
 
-A [Unity usage example](samples/Unity/AssetBallExample.cs) is included.
-- [File format and implementation decisions](spec/FORMAT.md)
-- [Tests and validation procedures](spec/VALIDATION.md)
+Unity 向けには [利用例](samples/Unity/AssetBallExample.cs) を用意しています。実 AWS 環境や Unity Editor / IL2CPP / 実機での動作は未検証です。
 
-## License
+- [ファイル形式・実装上の設計判断](spec/FORMAT.ja.md)
+- [テスト・動作確認手順](spec/VALIDATION.ja.md)
+
+## ライセンス
 
 Copyright (c) 2026 AssetBall contributors
 
-[GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`)
+[GNU General Public License v3.0](LICENSE)（`GPL-3.0-only`）

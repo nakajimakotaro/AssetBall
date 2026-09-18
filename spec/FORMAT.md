@@ -4,7 +4,7 @@ English | [日本語](FORMAT.ja.md)
 
 ## Files
 
-`index.json` is UTF-8 JSON (written without a BOM, using LF line endings). `version` identifies the format version, not a release number. Build timestamps and absolute paths are omitted, so the output is reproducible from the same input and previous Index.
+`index.json` is UTF-8 JSON (written without a BOM, using LF line endings). `version` identifies the format version, not a release number. Ball names use `ball-<UTC timestamp>-<SHA-256>.bin`, with a fixed-width timestamp in `yyyyMMddTHHmmss.fffffffZ` format, so ordinal filename sorting follows timestamp order. The timestamp is assigned after writing the Ball. The hash distinguishes different content generated at the same time. Ball bytes and layout are reproducible from the same input and previous Index; each build receives a new timestamp. Absolute paths are omitted.
 
 ```json
 {
@@ -12,7 +12,7 @@ English | [日本語](FORMAT.ja.md)
   "version": 1,
   "hashAlgorithm": "sha256",
   "ball": {
-    "file": "ball-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+    "file": "ball-20260918T072345.1234567Z-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
     "size": 0,
     "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
@@ -29,7 +29,7 @@ A Ball contains no headers, padding, compression, or file names. The order of `a
 In addition to the [JSON Schema](index.schema.json), the implementation checks the following:
 
 - `format` / `version` / `hashAlgorithm` must have supported values.
-- `ball.file` must match `ball-<ball.hash>.bin`. URLs, path separators, and arbitrary hosts are not allowed.
+- `ball.file` must be a single `ball-*.bin` filename containing only letters, digits, `-`, `_`, and `.`. The timestamp and hash embedded in the name are not validated; content integrity is verified against `ball.hash`.
 - Paths must be nonempty, relative, and `/`-separated. Empty components, `.`, `..`, backslashes, colons, and control characters are rejected.
 - Paths must be unique using case-sensitive comparison. Unicode normalization is not performed.
 - The first offset must be 0, and each subsequent offset must equal the end of the previous asset. Gaps, overlaps, and overflow are not allowed.
@@ -52,7 +52,7 @@ The S3 `MultipartPlanner` converts these shared copy ranges into parts that sati
 
 ## Publication decisions
 
-Overwriting a single fixed Ball name would create a window in which clients holding an old Index access the new Ball. For this reason, v1 requires a Ball name containing its hash. Ball generation, retrieval, and verification are completed before switching the Index.
+Overwriting a single fixed Ball name would create a window in which clients holding an old Index access the new Ball. For this reason, the builder generates Ball names containing a timestamp and hash. Ball generation, retrieval, and verification are completed before switching the Index.
 
 Locally, the Index is replaced atomically within the same directory. Writes are serialized using an exclusive lock. Full durability of directory entries across an OS crash or power failure is not guaranteed. After an interruption, the Ball referenced by the Index can be verified and fetched again if corrupted.
 

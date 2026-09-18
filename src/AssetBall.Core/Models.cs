@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace AssetBall.Core;
 
 /// <summary>アセットの識別子と Ball 内の位置。データ本体は持たず、範囲は [Offset, Offset + Size)。</summary>
@@ -15,6 +17,7 @@ public sealed class AssetEntry
 /// <summary>1 世代の Ball を記述するメタデータ。Assets の順序が、そのまま Ball 内の配置順になる。</summary>
 public sealed class BallIndex
 {
+    private const string TimestampFormat = "yyyyMMdd'T'HHmmss'.'fffffff'Z'";
     public const string Format = "assetball";
     public const int Version = 1;
     public string BallFile { get; }
@@ -32,8 +35,10 @@ public sealed class BallIndex
 
     public void Validate()
     {
-        if (!IsHash(Hash) || Size < 0 || BallFile != FileName(Hash))
-            throw new InvalidDataException("Invalid Ball metadata or content-addressed filename.");
+        if (!IsHash(Hash) || Size < 0 || string.IsNullOrEmpty(BallFile) ||
+            !BallFile.StartsWith("ball-", StringComparison.Ordinal) || !BallFile.EndsWith(".bin", StringComparison.Ordinal) ||
+            BallFile.Any(c => !char.IsLetterOrDigit(c) && c != '-' && c != '_' && c != '.'))
+            throw new InvalidDataException("Invalid Ball metadata or filename.");
         // Ball は生バイト列の連結なので、穴・重なり・パディングを認めない。
         long end = 0;
         var paths = new HashSet<string>(StringComparer.Ordinal);
@@ -48,8 +53,11 @@ public sealed class BallIndex
         if (end != Size) throw new InvalidDataException("Ball size does not match asset layout.");
     }
 
-    // 内容ごとのファイル名にすることで、古い Index も対応する世代の Ball を参照できる。
-    public static string FileName(string hash) => $"ball-{hash}.bin";
+    // 固定桁の UTC 日時で名前順を時系列に揃え、同時刻の異なる内容はハッシュで区別する。
+    public static string FileName(string hash) => FileName(hash, DateTimeOffset.UtcNow);
+    public static string FileName(string hash, DateTimeOffset createdAt) =>
+        $"ball-{createdAt.UtcDateTime.ToString(TimestampFormat, CultureInfo.InvariantCulture)}-{hash}.bin";
+
     public static bool IsHash(string? value) => value != null && value.Length == 64 &&
         value.All(c => c >= '0' && c <= '9' || c >= 'a' && c <= 'f');
 
