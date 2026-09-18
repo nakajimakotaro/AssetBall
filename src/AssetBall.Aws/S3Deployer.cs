@@ -5,10 +5,11 @@ using AssetBall.Core;
 
 namespace AssetBall.Aws;
 
+// Index の内容と取得時点の ETag を組にし、公開時に他のデプロイとの競合を検出する。
 public sealed record RemoteIndex(BallIndex Index, string ETag);
 public sealed record DeploymentResult(BallIndex Index, MultipartPlan Plan, bool DryRun, string IndexKey);
 
-/// <summary>Caller owns the S3 client and its retry policy. Uses immutable Ball keys and conditional Index publication.</summary>
+/// <summary>S3 上で Ball を先に完成させ、条件付きで Index を公開する。S3 クライアントと再試行方針は呼び出し側が管理する。</summary>
 public sealed class S3Deployer
 {
     private readonly IAmazonS3 s3;
@@ -36,14 +37,18 @@ public sealed class S3Deployer
         string Key(string name) => prefix.Length == 0 ? name : prefix + "/" + name;
         string indexKey = Key("index.json");
         var previous = await FetchIndexAsync(bucket, indexKey, cancellationToken);
+        // 旧 Index の順序を引き継ぎつつ、ローカルには完全な新 Ball を作る。
+        // S3 の制約で未変更分までアップロードする場合も、この Ball から必要な範囲を読み出せる。
         var index = await BallStore.BuildAsync(inputDirectory, workDirectory, previous?.Index, cancellationToken: cancellationToken);
         using var writerLock = BallStore.AcquireWriter(workDirectory);
         var plan = MultipartPlanner.Create(previous?.Index, index);
         var result = new DeploymentResult(index, plan, dryRun, indexKey);
+        // dry-run でもリモートの読み取りとローカル生成は行い、S3 への書き込みだけを省く。
         if (dryRun) return result;
 
         string ballPath = Path.Combine(workDirectory, index.BallFile);
         await BallStore.VerifyAsync(ballPath, index, cancellationToken);
+        // コピー元 Ball の ETag はコピー中の変更検出用。Index 公開の競合検出用 ETag とは別に扱う。
         string? sourceETag = null;
         if (plan.CopyBytes > 0 || previous?.Index.Hash == index.Hash)
         {
@@ -53,9 +58,10 @@ public sealed class S3Deployer
                 throw new InvalidDataException("Remote copy source does not match the previous Index.");
             sourceETag = metadata.ETag;
         }
-        // An identical Ball already exists and needs no multipart rewrite (the Index can still change).
+        // 同じ Ball なら再送不要。ただしパスなどのメタデータだけ変わる場合があるので、Index は公開する。
         if (previous?.Index.Hash != index.Hash)
         {
+            // 空 Ball は Part を作れないため、通常の PutObject で保存する。
             if (index.Size == 0)
             {
                 using var empty = new MemoryStream(Array.Empty<byte>());
@@ -68,6 +74,7 @@ public sealed class S3Deployer
             }
             else
             {
+                // COMPOSITE は Part ごとのチェックサムを合成した値で、Index に記録した Ball 全体の SHA-256 とは異なる。
                 var initiation = await s3.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest
                 {
                     BucketName = bucket, Key = Key(index.BallFile), ContentType = "application/octet-stream",
@@ -116,7 +123,7 @@ public sealed class S3Deployer
                 }
                 catch (Exception failure)
                 {
-                    // Cleanup must still run after caller cancellation, with a bounded independent token.
+                    // 呼び出し元がキャンセル済みでも未完了 Part を片付けるため、後始末専用の期限付きトークンを使う。
                     using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                     try
                     {
@@ -129,6 +136,8 @@ public sealed class S3Deployer
             }
         }
 
+        // Ball の完成後に公開世代を切り替える。取得時の ETag が変わっていれば競合として失敗させる。
+        // 初回は Index が存在しないことを条件にする。旧 Ball は進行中の取得のために残す。
         using var body = new MemoryStream(IndexJson.Serialize(index), writable: false);
         try
         {

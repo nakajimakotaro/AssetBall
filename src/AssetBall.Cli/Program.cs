@@ -6,6 +6,7 @@ using AssetBall.Aws;
 using AssetBall.Client;
 using AssetBall.Core;
 
+// CLI は引数・リソースの寿命・終了コードを担当し、配置や公開の手順は各ライブラリに委譲する。
 internal static class Program
 {
     private const string Help = """
@@ -24,6 +25,7 @@ internal static class Program
     public static async Task<int> Main(string[] args)
     {
         using var cancellation = new CancellationTokenSource();
+        // 即時終了せずキャンセルを伝え、一時ファイルや未完了 Multipart の後始末を実行させる。
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
         try
         {

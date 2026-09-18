@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace AssetBall.Core;
 
-/// <summary>Streaming disk operations. Published Balls are immutable; index.json is the commit point.</summary>
+/// <summary>Ball の生成・検証・公開を担うディスク I/O 層。内容ごとの Ball を保存し、index.json で公開世代を切り替える。</summary>
 public static class BallStore
 {
     public static async Task<BallIndex> BuildAsync(string inputDirectory, string outputDirectory,
@@ -10,12 +10,14 @@ public static class BallStore
     {
         string input = Path.GetFullPath(inputDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         string output = Path.GetFullPath(outputDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        // Conservatively reject case-only aliases on all platforms and output inside the source tree.
+        // 出力を次回の入力として取り込まないよう、入力配下への出力を拒否する。
+        // 大文字小文字だけが異なる別名も、プラットフォームによらず保守的に拒否する。
         if (output.StartsWith(input, StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Output directory must be outside the input directory.");
         if (!Directory.Exists(input)) throw new DirectoryNotFoundException(input);
         RejectLink(input);
         var files = EnumerateFiles(input).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        // まずメタデータを収集して配置を決める。アセット本体はメモリに保持しない。
         var entries = new List<AssetEntry>();
         var sources = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (string file in files)
@@ -34,6 +36,7 @@ public static class BallStore
         string temp = Path.Combine(output, ".ball-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
+            // 前回 Index だけでも順序は引き継げる。旧 Ball も指定された場合は、検証してから再利用する。
             if (previousBallPath != null)
             {
                 if (previous == null) throw new ArgumentException("A previous Index is required for Ball reuse.");
@@ -64,7 +67,7 @@ public static class BallStore
             string hash;
             using (var stream = File.OpenRead(temp)) hash = await StreamIO.HashAsync(stream, cancellationToken).ConfigureAwait(false);
             var index = new BallIndex(BallIndex.FileName(hash), new FileInfo(temp).Length, hash, layout);
-            // This also detects same-size changes between the initial scan and the write.
+            // スキャン後に同じサイズの別内容へ変わった場合も、書き上がったデータのハッシュで検出する。
             await VerifyAsync(temp, index, cancellationToken).ConfigureAwait(false);
             await CommitAsync(temp, output, index, cancellationToken).ConfigureAwait(false);
             return index;
@@ -77,6 +80,7 @@ public static class BallStore
         index.Validate();
         using var stream = File.OpenRead(ballPath);
         if (stream.Length != index.Size) throw new InvalidDataException("Ball length mismatch.");
+        // Index が隙間のない配置であることを利用し、1 回の逐次読み取りで個別・全体のハッシュを検証する。
         using var ballHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[StreamIO.BufferSize];
         foreach (var asset in index.Assets)
@@ -97,6 +101,7 @@ public static class BallStore
         if (StreamIO.Hex(ballHash.GetHashAndReset()) != index.Hash) throw new InvalidDataException("Ball hash mismatch.");
     }
 
+    /// <summary>検証済みの Ball からアセット範囲だけを公開する。返した Stream の破棄は呼び出し側が担う。</summary>
     public static Stream OpenAsset(string directory, BallIndex index, string assetPath)
     {
         var asset = index.Assets.FirstOrDefault(x => x.Path == assetPath) ?? throw new FileNotFoundException("Asset not found.", assetPath);
@@ -105,20 +110,21 @@ public static class BallStore
         catch { stream.Dispose(); throw; }
     }
 
-    /// <summary>Single-writer guard shared by builders and clients; never delete the lock file.</summary>
+    /// <summary>ビルダーとクライアントで共用する書き込み排他。競合時は失敗する。ロックファイル自体は削除しない。</summary>
     public static FileStream AcquireWriter(string directory)
     {
         Directory.CreateDirectory(directory);
         return new FileStream(Path.Combine(directory, ".assetball.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     }
 
-    /// <summary>Caller must hold the writer guard and have verified the temporary Ball.</summary>
+    /// <summary>検証済みの一時 Ball を公開する。呼び出し側で書き込みロックを保持しておくこと。</summary>
     public static async Task CommitAsync(string temporaryBall, string directory, BallIndex index, CancellationToken cancellationToken = default)
     {
-        // Serialize before moving anything so invalid/oversized Indexes cannot be committed.
+        // 移動前にシリアライズし、不正またはサイズ超過の Index を公開手順に進めない。
         byte[] json = IndexJson.Serialize(index);
         string ballPath = Path.Combine(directory, index.BallFile);
         cancellationToken.ThrowIfCancellationRequested();
+        // 同じ内容の Ball は再利用する。ただし既存ファイルが破損していれば検証済みのものに置き換える。
         if (File.Exists(ballPath))
         {
             try
@@ -129,6 +135,8 @@ public static class BallStore
             catch (InvalidDataException) { File.Replace(temporaryBall, ballPath, null); }
         }
         else File.Move(temporaryBall, ballPath);
+        // Ball を先に確定し、最後に同じディレクトリ内で Index を atomic replace する。
+        // 公開前に失敗しても旧 Index は有効。旧 Ball は古い Index の読み手のために残す。
         string tempIndex = Path.Combine(directory, ".index-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
